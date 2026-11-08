@@ -1,0 +1,50 @@
+name: Diagnose Ubuntu MCP probe
+on:
+  push:
+    branches: [codex/diagnose-285-ubuntu]
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: github.repository == 'Nari-Ab/Stroq'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, srt: '0.0.79'}
+          - {os: ubuntu-26.04, srt: '0.0.79'}
+          - {os: ubuntu-26.04, srt: '0.0.81'}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+      - name: Install probe dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap socat ripgrep
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --version
+          uname -r
+          npm install -g "@anthropic-ai/sandbox-runtime@$SRT_VERSION"
+          pnpm install --frozen-lockfile
+        env:
+          SRT_VERSION: ${{ matrix.srt }}
+      - name: Run the unchanged native probe
+        id: probe
+        run: pnpm exec vitest run packages/cli/test/install/mcp-probe-native.test.ts
+        env:
+          STROQ_REQUIRE_SRT: '1'
+      - name: Collect probe stderr and kernel denials
+        if: failure() && steps.probe.conclusion == 'failure'
+        run: |
+          sed -i "s/stdio: \['pipe', 'pipe', 'ignore'\]/stdio: ['pipe', 'pipe', 'inherit']/" packages/cli/src/install/mcp-probe.ts
+          pnpm exec vitest run packages/cli/test/install/mcp-probe-native.test.ts || true
+          sudo dmesg | tail -100 | rg -i 'apparmor|bwrap|seccomp' || true
+        env:
+          STROQ_REQUIRE_SRT: '1'
