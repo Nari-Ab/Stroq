@@ -1,0 +1,57 @@
+name: Verify native MCP probe on Ubuntu
+on:
+  push:
+    branches: [codex/verify-285-srt-083]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.repository == 'Nari-Ab/Stroq'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            runtime: '0.0.79'
+            prefix: .github/tools/mcp-probe
+          - os: ubuntu-26.04
+            runtime: '0.0.79'
+            prefix: .github/tools/mcp-probe
+          - os: ubuntu-26.04
+            runtime: '0.0.83'
+            prefix: tools/diagnostics/mcp-probe-0.0.83
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+      - name: Install dependencies and record the runner configuration
+        env:
+          TOOL_PREFIX: ${{ matrix.prefix }}
+          EXPECTED_RUNTIME: ${{ matrix.runtime }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap socat ripgrep
+          cat /etc/os-release
+          uname -r
+          bwrap --version
+          sysctl kernel.apparmor_restrict_unprivileged_userns || true
+          npm ci --prefix "$TOOL_PREFIX" --ignore-scripts --no-audit --no-fund
+          test "$(node -p "require('./$TOOL_PREFIX/node_modules/@anthropic-ai/sandbox-runtime/package.json').version")" = "$EXPECTED_RUNTIME"
+          echo "$GITHUB_WORKSPACE/$TOOL_PREFIX/node_modules/.bin" >> "$GITHUB_PATH"
+          pnpm install --frozen-lockfile
+      - name: Run native probe containment checks
+        id: native-probe
+        env:
+          STROQ_REQUIRE_SRT: '1'
+        run: pnpm exec vitest run packages/cli/test/install/mcp-probe-native.test.ts
+      - name: Report kernel diagnostics for the failed probe
+        if: failure() && steps.native-probe.conclusion == 'failure'
+        run: sudo journalctl -k -n 150 --no-pager | rg -i 'apparmor.*(bwrap|apply-seccomp)' || true
