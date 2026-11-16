@@ -1,13 +1,14 @@
-param([switch] $ConsoleRun)
+param([switch] $ConsoleRun, [string] $ConsoleKind = 'classic')
 $ErrorActionPreference = 'Stop'
 $package = '@stroq/cli@0.32.0'
-$terminalReport = Join-Path $env:RUNNER_TEMP 'stroq-card-console-289.json'
-$ttyReport = Join-Path $env:RUNNER_TEMP 'stroq-card-tty-289.json'
+$terminalReport = Join-Path $env:RUNNER_TEMP "stroq-card-$ConsoleKind-289.json"
+$ttyReport = Join-Path $env:RUNNER_TEMP "stroq-card-tty-$ConsoleKind-289.json"
 
 if ($ConsoleRun) {
     try {
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-        & node -e "require('node:fs').writeFileSync(require('node:path').join(process.env.RUNNER_TEMP,'stroq-card-tty-289.json'), JSON.stringify({tty:!!process.stdout.isTTY,columns:process.stdout.columns || 0}))"
+        $env:STROQ289_TTY_REPORT = $ttyReport
+        & node -e "require('node:fs').writeFileSync(process.env.STROQ289_TTY_REPORT, JSON.stringify({tty:!!process.stdout.isTTY,columns:process.stdout.columns || 0}))"
         if ($LASTEXITCODE -ne 0) { throw 'Node could not report the console status.' }
         $tty = Get-Content -Raw $ttyReport | ConvertFrom-Json
         if (-not $tty.tty) { throw 'Node did not have a terminal.' }
@@ -98,4 +99,38 @@ Write-Output $report
 $rendered = $report | ConvertFrom-Json
 if ($console.ExitCode -ne 0 -or -not $rendered.cardTitle -or -not $rendered.sessions) {
     throw 'Could not verify the card in the separate console.'
+}
+
+$terminalArchive = Join-Path $scratch 'terminal-arm64.zip'
+$terminalFolder = Join-Path $scratch 'terminal-arm64'
+$terminalUri = 'https://github.com/microsoft/terminal/releases/download/v1.25.3131.0/Microsoft.WindowsTerminal_1.25.3131.0_arm64.zip'
+$archiveHash = 'b7e1d2a414e6368affd098d91a4cba441dcacd3ab634a6f39c8e6f5490deef89'
+Invoke-WebRequest -Uri $terminalUri -OutFile $terminalArchive
+if ((Get-FileHash $terminalArchive -Algorithm SHA256).Hash -ne $archiveHash) {
+    throw 'Windows Terminal archive checksum differs from the published release.'
+}
+Expand-Archive -LiteralPath $terminalArchive -DestinationPath $terminalFolder
+$terminalExe = Get-ChildItem -LiteralPath $terminalFolder -Recurse -Filter 'WindowsTerminal.exe' |
+    Select-Object -First 1
+if (-not $terminalExe) { throw 'The portable Windows Terminal executable is missing.' }
+New-Item -Path (Join-Path $terminalExe.DirectoryName '.portable') -ItemType File -Force | Out-Null
+
+$windowsTerminalReport = Join-Path $env:RUNNER_TEMP 'stroq-card-terminal-289.json'
+$terminalArguments = @(
+    '-w', 'new', '--size', '100,48', 'new-tab', '--inheritEnvironment',
+    '-d', ('"{0}"' -f $project), ('"{0}"' -f $shellPath)
+) + $arguments + @('-ConsoleKind', 'terminal')
+$terminal = Start-Process -FilePath $terminalExe.FullName -ArgumentList $terminalArguments -PassThru
+$deadline = [DateTime]::UtcNow.AddSeconds(90)
+while (-not (Test-Path -LiteralPath $windowsTerminalReport) -and [DateTime]::UtcNow -lt $deadline) {
+    Start-Sleep -Milliseconds 350
+}
+if (-not (Test-Path -LiteralPath $windowsTerminalReport)) {
+    throw 'Windows Terminal did not produce a console report.'
+}
+$report = Get-Content -Raw $windowsTerminalReport
+Write-Output $report
+$rendered = $report | ConvertFrom-Json
+if (-not $rendered.windowsTerminal -or -not $rendered.cardTitle -or -not $rendered.sessions -or $rendered.owlHalfBlockCells -eq 0) {
+    throw 'Could not verify the card and owl in Windows Terminal.'
 }
